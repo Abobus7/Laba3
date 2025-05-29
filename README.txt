@@ -1,0 +1,128 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+from PIL import Image, ImageTk
+import mysql.connector
+import os
+
+
+class PartnerApp:
+    def __init__(self, root):
+        self.root, self.current = root, None
+        root.title("Обои")
+        root.geometry("1000x600")
+        try:
+            icon_path = "Наш декор.ico"
+            if os.path.exists(icon_path):
+                img = Image.open(icon_path)
+                icon = ImageTk.PhotoImage(img)
+                root.tk.call('wm', 'iconphoto', root._w, icon)
+        except Exception as e:
+            print(f"Не удалось загрузить иконку: {e}")
+        self.db = self.connect_db()
+        self.logo = self.load_image("Наш декор.png", (50, 50))
+        self.build_ui()
+        self.load_partners()
+
+    def connect_db(self):
+        return mysql.connector.connect(host='localhost', user='root', password='123456', database='Oboi')
+
+    def load_image(self, path, size):
+        return ImageTk.PhotoImage(Image.open(path).resize(size))
+    def build_ui(self):
+        header = tk.Frame(self.root, bg='#F4E8D3'); header.pack(fill=tk.X)
+        if self.logo: tk.Label(header, image=self.logo, bg='#F4E8D3').pack(side=tk.LEFT, padx=10)
+        tk.Label(header, text="Список партнеров", bg='#F4E8D3', font=('Segoe UI', 14, 'bold')).pack(side=tk.LEFT)
+        for text, cmd in [("Добавить", self.add_partner), ("Редактировать", self.edit_partner)]:
+            tk.Button(header, text=text, command=cmd, bg='#67BA80', fg='white').pack(side=tk.RIGHT, padx=5)
+        self.tree = ttk.Treeview(self.root, columns=("type", "name", "director", "phone", "rating"), show='headings')
+        for col, title, w in zip(self.tree['columns'], ['Тип продукции', 'Наименование продукции', 'Артикул', 'Минимальная стоимость для партнера', 'Ширина рулона, м'], [200, 200, 120, 120, 120]):
+            self.tree.heading(col, text=title)
+            self.tree.column(col, width=w)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        self.tree.bind('<<TreeviewSelect>>', self.on_select)
+        self.sales_btn = tk.Button(self.root, text="История продаж", command=self.show_sales, state=tk.DISABLED, bg='#67BA80', fg='white')
+        self.sales_btn.pack(pady=10)
+
+    def calculate_discount(self, total):
+        return next((d for t, d in [(300_000_000, 20), (200_000_000, 15), (100_000_000, 10), (20_000_000, 5)] if total >= t), 0)
+
+    def load_partners(self):
+        cur = self.db.cursor(dictionary=True)
+        cur.execute("""
+            SELECT * from products_import
+        """)
+        self.tree.delete(*self.tree.get_children())
+        for p in cur:
+            self.tree.insert('', tk.END, values=(p['Тип продукции'], p['Наименование продукции'], p['Артикул'], p['Минимальная стоимость для партнера'], p['Ширина рулона, м']))
+
+    def on_select(self, _):
+        item = self.tree.focus()
+        if not item: return
+        vals = self.tree.item(item, 'values')
+        self.current = {k: v for k, v in zip(['type', 'name', 'director', 'phone', 'rating'], vals)}
+        self.sales_btn.config(state=tk.NORMAL)
+
+    def show_sales(self):
+        if not self.current: return
+        win = tk.Toplevel(self.root); win.title(f"Материалы для {self.current['name']}"); win.geometry("800x500")
+        tk.Button(win, text="Назад", command=win.destroy, bg='#67BA80', fg='white').pack(anchor='w', padx=10, pady=5)
+        info = tk.Frame(win); info.pack(fill=tk.X, padx=10)
+        cur = self.db.cursor(dictionary=True)
+        tree = ttk.Treeview(win, columns=("date", "product", "qty"), show='headings')
+        for col, txt, w in zip(tree['columns'], ["Продукция", "Наименование материала", "Необходимое количество материала"], [200, 200, 80]):
+            tree.heading(col, text=txt); tree.column(col, width=w)
+        tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        cur.execute("""
+            SELECT * from product_materials_import where `Продукция`= %s
+        """, (self.current['name'],))
+        for row in cur:
+            tree.insert('', tk.END, values=(row['Продукция'], row['Наименование материала'], row['Необходимое количество материала']))
+
+    def add_partner(self):
+        self.partner_form("Добавить партнера")
+
+    def edit_partner(self):
+        if not self.current:
+            messagebox.showinfo("Внимание", "Выберите партнера")
+            return
+        self.partner_form("Редактировать партнера", self.current['name'])
+
+    def partner_form(self, title, edit_name=None):
+        win = tk.Toplevel(self.root); win.title(title); win.geometry("500x500")
+        labels = ["Тип продукции", "Наименование продукции", "Артикул", "Минимальная стоимость для партнера", "Ширина рулона, м"]
+        fields = {}
+        for label in labels:
+            f = tk.Frame(win); f.pack(fill=tk.X, padx=10, pady=5)
+            tk.Label(f, text=label).pack(anchor='w')
+            entry = tk.Entry(f); entry.pack(fill=tk.X)
+            fields[label] = entry
+        if edit_name:
+            cur = self.db.cursor(dictionary=True)
+            cur.execute("SELECT * FROM products_import WHERE `Наименование продукции` = %s", (edit_name,))
+            data = cur.fetchone()
+            for label in labels:
+                val = data.get(label if label != "Электронная почта" else "Электронная почта партнера", "")
+                fields[label].insert(0, val)
+
+        def save():
+            values = [fields[l].get() for l in labels]
+            if not all(values): return messagebox.showerror("Ошибка", "Все поля обязательны")
+            cur = self.db.cursor()
+            if edit_name:
+                cur.execute("""
+                    UPDATE products_import SET `Тип продукции`=%s, `Наименование продукции`=%s, `Артикул`=%s,
+                    `Минимальная стоимость для партнера`=%s, `Ширина рулона, м`=%s WHERE `Наименование продукции`=%s
+                """, (*values, edit_name))
+            else:
+                cur.execute("""
+                    INSERT INTO products_import (`Тип продукции`, `Наименование продукции`, `Артикул`,
+                    `Минимальная стоимость для партнера`, `Ширина рулона, м`) VALUES (%s,%s,%s,%s,%s)
+                """, values)
+            self.db.commit()
+            win.destroy()
+            self.load_partners()
+        tk.Button(win, text="Сохранить", command=save, bg='#67BA80', fg='white').pack(pady=10)
+if __name__ == '__main__':
+    root = tk.Tk()
+    app = PartnerApp(root)
+    root.mainloop()
